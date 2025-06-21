@@ -206,7 +206,7 @@ chmod 644 /etc/netdata/python.d/demo_servers.conf
 
 # Создание дополнительного bash плагина для сетевых метрик
 mkdir -p /etc/netdata/charts.d
-cat > /etc/netdata/charts.d/demo_network.chart.sh << 'EOF'
+cat > /etc/netdata/charts.d/demo_network.chart.sh << 'SCRIPT_EOF'
 #!/bin/bash
 
 # Demo network metrics for servers
@@ -222,12 +222,12 @@ demo_network_create() {
     for server in HQ-SRV HQ-RTR BR-RTR BR-SRV; do
         server_id=$(echo $server | tr '[:upper:]' '[:lower:]' | tr '-' '_')
 
-        cat << EOF
+        cat << NETDATA_EOF
 CHART ${server_id}.network '' "Network Traffic - $server" "KB/s" network ${server}.network area $demo_network_priority $demo_network_update_every
 DIMENSION received '' absolute 1 1
 DIMENSION sent '' absolute -1 1
 
-EOF
+NETDATA_EOF
     done
     return 0
 }
@@ -240,17 +240,17 @@ demo_network_update() {
         received=$((RANDOM % 5000 + 100))
         sent=$((RANDOM % 3000 + 50))
 
-        cat << EOF
+        cat << NETDATA_EOF
 BEGIN ${server_id}.network $(date +%s)
 SET received = $received
 SET sent = $sent
 END
 
-EOF
+NETDATA_EOF
     done
     return 0
 }
-EOF
+SCRIPT_EOF
 
 chmod +x /etc/netdata/charts.d/demo_network.chart.sh
 chown netdata:netdata /etc/netdata/charts.d/demo_network.chart.sh
