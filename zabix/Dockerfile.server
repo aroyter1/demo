@@ -1,0 +1,221 @@
+FROM ubuntu:22.04
+
+# Избегаем интерактивного режима
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Europe/Moscow
+
+# Устанавливаем часовой пояс
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# Обновляем систему и устанавливаем необходимые пакеты
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    mysql-server \
+    apache2 \
+    php \
+    php-mysql \
+    php-gd \
+    php-xml \
+    php-bcmath \
+    php-mbstring \
+    php-ldap \
+    supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+# Добавляем репозиторий Zabbix
+RUN wget https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu22.04_all.deb \
+    && dpkg -i zabbix-release_6.4-1+ubuntu22.04_all.deb \
+    && apt-get update
+
+# Устанавливаем Zabbix Server и веб-интерфейс
+RUN apt-get install -y \
+    zabbix-server-mysql \
+    zabbix-frontend-php \
+    zabbix-apache-conf \
+    zabbix-sql-scripts \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копируем конфигурационные файлы
+COPY conf/zabbix_server.conf /etc/zabbix/zabbix_server.conf
+
+# Создаем скрипт инициализации
+RUN cat > /init.sh << 'EOF'
+#!/bin/bash
+
+# Запускаем MySQL
+service mysql start
+
+# Создаем базу данных и пользователя
+mysql -u root << MYSQL_EOF
+CREATE DATABASE IF NOT EXISTS zabbix character set utf8 collate utf8_bin;
+CREATE USER IF NOT EXISTS 'zabbix'@'localhost' IDENTIFIED BY 'P@ssw0rd';
+GRANT ALL PRIVILEGES ON zabbix.* TO 'zabbix'@'localhost';
+FLUSH PRIVILEGES;
+MYSQL_EOF
+
+# Импортируем схему базы данных (только если таблицы еще не созданы)
+TABLES_COUNT=$(mysql -u zabbix -p'P@ssw0rd' zabbix -e "SHOW TABLES;" | wc -l)
+if [ $TABLES_COUNT -eq 0 ]; then
+    echo "Импортируем схему базы данных..."
+    zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql -u zabbix -p'P@ssw0rd' zabbix
+fi
+
+# Настраиваем PHP для Zabbix
+cat > /etc/zabbix/apache.conf << APACHE_EOF
+<VirtualHost *:80>
+    ServerName mon.au-team.irpo
+    DocumentRoot /usr/share/zabbix
+
+    <Directory "/usr/share/zabbix">
+        Options FollowSymLinks
+        AllowOverride None
+        Require all granted
+
+        <IfModule mod_php.c>
+            php_value max_execution_time 300
+            php_value memory_limit 128M
+            php_value post_max_size 16M
+            php_value upload_max_filesize 2M
+            php_value max_input_time 300
+            php_value max_input_vars 10000
+            php_value always_populate_raw_post_data -1
+            php_value date.timezone Europe/Moscow
+        </IfModule>
+    </Directory>
+
+    # Настройка SSL
+    SSLEngine off
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName mon.au-team.irpo
+    DocumentRoot /usr/share/zabbix
+
+    SSLEngine on
+    SSLCertificateFile /etc/ssl/certs/ssl-cert-snakeoil.pem
+    SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
+
+    <Directory "/usr/share/zabbix">
+        Options FollowSymLinks
+        AllowOverride None
+        Require all granted
+
+        <IfModule mod_php.c>
+            php_value max_execution_time 300
+            php_value memory_limit 128M
+            php_value post_max_size 16M
+            php_value upload_max_filesize 2M
+            php_value max_input_time 300
+            php_value max_input_vars 10000
+            php_value always_populate_raw_post_data -1
+            php_value date.timezone Europe/Moscow
+        </IfModule>
+    </Directory>
+</VirtualHost>
+APACHE_EOF
+
+# Включаем SSL модуль
+a2enmod ssl
+a2enmod rewrite
+
+# Создаем конфигурацию веб-интерфейса Zabbix
+cat > /usr/share/zabbix/conf/zabbix.conf.php << PHP_EOF
+<?php
+// Zabbix GUI configuration file.
+
+\$DB['TYPE']     = 'MYSQL';
+\$DB['SERVER']   = 'localhost';
+\$DB['PORT']     = '3306';
+\$DB['DATABASE'] = 'zabbix';
+\$DB['USER']     = 'zabbix';
+\$DB['PASSWORD'] = 'P@ssw0rd';
+
+// Schema name. Used for PostgreSQL.
+\$DB['SCHEMA'] = '';
+
+// Used for TLS connection.
+\$DB['ENCRYPTION'] = false;
+\$DB['KEY_FILE'] = '';
+\$DB['CERT_FILE'] = '';
+\$DB['CA_FILE'] = '';
+\$DB['VERIFY_HOST'] = false;
+\$DB['CIPHER_LIST'] = '';
+
+// Use IEEE754 compatible value range for 64-bit Numeric (float) history values.
+\$DB['DOUBLE_IEEE754'] = true;
+
+\$ZBX_SERVER      = 'localhost';
+\$ZBX_SERVER_PORT = '10051';
+\$ZBX_SERVER_NAME = 'Zabbix Monitoring Server';
+
+\$IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
+
+// Uncomment this block only if you are using Elasticsearch.
+// \$SEARCH['ELASTICSEARCH_URL'] = ['http://localhost:9200'];
+// \$SEARCH['ELASTICSEARCH_USERNAME'] = '';
+// \$SEARCH['ELASTICSEARCH_PASSWORD'] = '';
+
+// Uncomment and set to desired values to override Elasticsearch query size limit.
+// \$SEARCH['ELASTICSEARCH_LIMIT'] = 1000;
+
+//\$HISTORY['url']   = 'http://localhost:8080';
+//\$HISTORY['username'] = '';
+//\$HISTORY['password'] = '';
+
+//\$SSO['SP_ENTITY_ID'] = '';
+//\$SSO['SP_SLS_URL'] = '';
+//\$SSO['SP_ACS_URL'] = '';
+//\$SSO['SP_X509_CERT'] = '';
+//\$SSO['SP_PRIVATE_KEY'] = '';
+//\$SSO['IDP_ENTITY_ID'] = '';
+//\$SSO['IDP_SSO_URL'] = '';
+//\$SSO['IDP_SLS_URL'] = '';
+//\$SSO['IDP_X509_CERT'] = '';
+//\$SSO['USERNAME_ATTRIBUTE'] = '';
+//\$SSO['SP_REQUESTED_NAMEID_FORMAT'] = '';
+//\$SSO['SIGN_MESSAGES'] = false;
+//\$SSO['SIGN_ASSERTIONS'] = false;
+//\$SSO['SIGN_AUTHN_REQUESTS'] = false;
+//\$SSO['SIGN_LOGOUT_REQUESTS'] = false;
+//\$SSO['SIGN_LOGOUT_RESPONSES'] = false;
+//\$SSO['ENCRYPT_ASSERTIONS'] = false;
+//\$SSO['CASE_SENSITIVE_LOGIN'] = false;
+PHP_EOF
+
+# Настраиваем права доступа
+chmod 644 /usr/share/zabbix/conf/zabbix.conf.php
+chown www-data:www-data /usr/share/zabbix/conf/zabbix.conf.php
+
+# Запускаем службы
+service zabbix-server start
+service apache2 start
+
+# Создаем пользователя admin с паролем P@ssw0rd
+sleep 10
+mysql -u zabbix -p'P@ssw0rd' zabbix << USER_EOF
+UPDATE users SET passwd = md5('P@ssw0rd') WHERE username = 'Admin';
+EOF
+
+echo "=== Zabbix Server запущен ==="
+echo "Доступ к веб-интерфейсу:"
+echo "HTTP:  http://localhost/zabbix"
+echo "HTTPS: https://mon.au-team.irpo"
+echo "Логин: Admin"
+echo "Пароль: P@ssw0rd"
+
+# Бесконечный цикл для поддержания контейнера
+tail -f /var/log/zabbix/zabbix_server.log
+EOF
+
+# Делаем скрипт исполняемым
+RUN chmod +x /init.sh
+
+# Открываем порты
+EXPOSE 80 443 10051
+
+# Запускаем инициализацию
+CMD ["/init.sh"]
