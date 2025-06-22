@@ -1,73 +1,124 @@
 #!/bin/bash
 
-# Скрипт для установки Zabbix на Debian 12
+# Скрипт для исправления проблем с репозиторием Zabbix
+# Используйте этот скрипт если основной скрипт не работает
 
-# Проверяем, что скрипт запущен с правами root
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Проверка прав root
 if [[ $EUID -ne 0 ]]; then
-   echo "Пожалуйста, запустите скрипт с помощью sudo или под root."
-   exit 1
-fi
-
-# Скачиваем репозиторий Zabbix
-wget https://repo.zabbix.com/zabbix/7.4/release/debian/pool/main/z/zabbix-release/zabbix-release_7.4-0.2+debian12_all.deb
-if [[ $? -ne 0 ]]; then
-    echo "Ошибка при скачивании репозитория Zabbix. Проверьте подключение к интернету или ссылку."
+    print_error "Запустите скрипт с правами root: sudo $0"
     exit 1
 fi
 
-# Устанавливаем репозиторий
-dpkg -i zabbix-release_7.4-0.2+debian12_all.deb
-if [[ $? -ne 0 ]]; then
-    echo "Ошибка при установке репозитория. Проверьте, что файл zabbix-release_7.4-0.2+debian12_all.deb существует."
-    exit 1
-fi
+print_status "Исправление проблем с репозиторием Zabbix..."
 
-# Обновляем список пакетов
+# Очистка старых ключей и репозиториев
+print_status "Очистка старых настроек..."
+rm -f /etc/apt/sources.list.d/*zabbix*
+rm -f /tmp/zabbix-release.deb
+
+# Обновление системы
+print_status "Обновление системы..."
 apt update
-if [[ $? -ne 0 ]]; then
-    echo "Ошибка при обновлении списка пакетов. Проверьте настройки репозиториев."
+apt install -y wget curl gnupg2 ca-certificates
+
+# Определение версии Debian
+if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    DEBIAN_VERSION=$VERSION_ID
+    print_status "Версия Debian: $DEBIAN_VERSION"
+else
+    print_error "Не удалось определить версию Debian"
     exit 1
 fi
 
-# Устанавливаем необходимые пакеты
-apt install -y zabbix-server-mysql zabbix-frontend-php zabbix-agent php php-mysql php-bcmath php-mbstring
-if [[ $? -ne 0 ]]; then
-    echo "Ошибка при установке пакетов. Проверьте наличие пакетов и доступность репозиториев."
-    exit 1
+# Попытка 1: Официальный репозиторий с новым ключом
+print_status "Попытка 1: Добавление GPG ключа через keyring..."
+if wget -qO - https://repo.zabbix.com/RPM-GPG-KEY-ZABBIX-A14FE591 | gpg --dearmor | tee /usr/share/keyrings/zabbix-archive-keyring.gpg > /dev/null 2>&1; then
+    print_success "GPG ключ добавлен через keyring"
+
+    # Добавляем репозиторий с новым ключом
+    echo "deb [signed-by=/usr/share/keyrings/zabbix-archive-keyring.gpg] https://repo.zabbix.com/zabbix/6.4/debian bookworm main" > /etc/apt/sources.list.d/zabbix.list
+
+    if apt update; then
+        print_success "Репозиторий добавлен успешно"
+        exit 0
+    fi
 fi
 
-# Проверяем наличие файла схемы базы данных
-if [[ ! -f /usr/share/doc/zabbix-sql-scripts/mysql/create.sql.gz ]]; then
-    echo "Файл схемы базы данных не найден: /usr/share/doc/zabbix-sql-scripts/mysql/create.sql.gz"
-    echo "Возможные причины: пакет zabbix-server-mysql не установлен или структура пакетов изменилась."
-    exit 1
+# Попытка 2: Старый способ через apt-key
+print_status "Попытка 2: Добавление ключа через apt-key..."
+if wget -qO - https://repo.zabbix.com/RPM-GPG-KEY-ZABBIX-A14FE591 | apt-key add - 2>/dev/null; then
+    print_success "GPG ключ добавлен через apt-key"
+
+    # Скачиваем пакет репозитория
+    case $DEBIAN_VERSION in
+        "12")
+            REPO_URL="https://repo.zabbix.com/zabbix/6.4/debian/pool/main/z/zabbix-release/zabbix-release_6.4-1+debian12_all.deb"
+            ;;
+        "11")
+            REPO_URL="https://repo.zabbix.com/zabbix/6.4/debian/pool/main/z/zabbix-release/zabbix-release_6.4-1+debian11_all.deb"
+            ;;
+        "10")
+            REPO_URL="https://repo.zabbix.com/zabbix/6.4/debian/pool/main/z/zabbix-release/zabbix-release_6.4-1+debian10_all.deb"
+            ;;
+        *)
+            REPO_URL="https://repo.zabbix.com/zabbix/6.4/debian/pool/main/z/zabbix-release/zabbix-release_6.4-1+debian11_all.deb"
+            ;;
+    esac
+
+    if wget "$REPO_URL" -O /tmp/zabbix-release.deb && dpkg -i /tmp/zabbix-release.deb; then
+        if apt update; then
+            print_success "Репозиторий добавлен успешно"
+            exit 0
+        fi
+    fi
 fi
 
-# Запрос пароля для пользователя root MySQL
-read -s -p "Введите пароль для пользователя root MySQL: " MYSQL_ROOT_PASS
-echo
-read -s -p "Введите пароль для пользователя zabbix (будет создан): " ZABBIX_PASS
-echo
-
-# Создание базы данных и пользователя
-mysql -u root -p"$MYSQL_ROOT_PASS" <<EOF
-CREATE DATABASE IF NOT EXISTS zabbix CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-CREATE USER IF NOT EXISTS 'zabbix'@'localhost' IDENTIFIED BY '$ZABBIX_PASS';
-GRANT ALL PRIVILEGES ON zabbix.* TO 'zabbix'@'localhost';
-FLUSH PRIVILEGES;
+# Попытка 3: Альтернативный репозиторий
+print_status "Попытка 3: Использование альтернативного репозитория..."
+cat > /etc/apt/sources.list.d/zabbix.list <<EOF
+# Альтернативный репозиторий Zabbix
+deb https://repo.zabbix.com/zabbix/6.0/debian bookworm main
 EOF
 
-if [[ $? -ne 0 ]]; then
-    echo "Ошибка при создании базы данных или пользователя. Проверьте правильность пароля root MySQL."
-    exit 1
+apt update --allow-insecure-repositories
+if apt update; then
+    print_success "Альтернативный репозиторий работает"
+    exit 0
 fi
 
-# Импорт схемы базы данных
-zcat /usr/share/doc/zabbix-sql-scripts/mysql/create.sql.gz | mysql -u zabbix -p"$ZABBIX_PASS" zabbix
-if [[ $? -ne 0 ]]; then
-    echo "Ошибка при импорте схемы базы данных. Проверьте правильность пароля пользователя zabbix и наличие файла схемы."
-    exit 1
-fi
+# Попытка 4: Ручная установка
+print_status "Попытка 4: Ручная установка пакетов..."
+print_status "Все автоматические методы не работают."
+print_status "Рекомендации:"
+echo "1. Проверьте подключение к интернету"
+echo "2. Попробуйте использовать VPN"
+echo "3. Проверьте настройки DNS"
+echo "4. Обратитесь к системному администратору"
 
-echo "База данных и пользователь созданы, схема импортирована."
-echo "Дальше настройте файл: sudo nano /etc/zabbix/zabbix_server.conf"
+print_error "Не удалось настроить репозиторий Zabbix"
+exit 1
